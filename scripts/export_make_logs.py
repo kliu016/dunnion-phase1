@@ -4,6 +4,7 @@ Prints only aggregate info: total count, oldest/newest timestamp, count by statu
 Never prints log contents, which may contain client PII.
 """
 
+import hashlib
 import json
 import os
 import sys
@@ -15,7 +16,7 @@ from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent.parent
 RAW_DIR = ROOT / "data" / "raw"
-PAGE_LIMIT = 100
+PAGE_LIMIT = 50  # Make rejects anything above 50
 
 
 def redact(text, secrets):
@@ -38,6 +39,24 @@ def extract_entries(payload):
     return []
 
 
+def entry_id(entry):
+    """Stable ID for dedupe: the entry's id, else a hash of its contents."""
+    if isinstance(entry, dict) and entry.get("id") is not None:
+        return str(entry["id"])
+    return "sha:" + hashlib.sha256(json.dumps(entry, sort_keys=True).encode()).hexdigest()
+
+
+def print_pagination(payload, offset):
+    """Print paging metadata (e.g. "pg") if the response includes it. Not PII."""
+    if not isinstance(payload, dict):
+        return
+    for key in ("pg", "pagination"):
+        meta = payload.get(key)
+        if isinstance(meta, dict):
+            fields = ", ".join(f"{k}={v}" for k, v in meta.items())
+            print(f"[offset {offset}] {key}: {fields}")
+
+
 def main():
     load_dotenv(ROOT / ".env")
     token = os.getenv("MAKE_TOKEN", "").strip()
@@ -50,10 +69,13 @@ def main():
         sys.exit("MAKE_BASE and SCENARIO_ID must be set in .env.")
 
     RAW_DIR.mkdir(parents=True, exist_ok=True)
+    for old in RAW_DIR.glob("make_logs_*.json"):
+        old.unlink()
     url = f"{base}/scenarios/{scenario_id}/logs"
     headers = {"Authorization": f"Token {token}"}
 
     all_entries = []
+    seen_ids = set()
     offset = 0
     while True:
         params = {"pg[limit]": PAGE_LIMIT, "pg[offset]": offset}
@@ -64,12 +86,23 @@ def main():
             sys.exit(1)
 
         payload = resp.json()
+        print_pagination(payload, offset)
         entries = extract_entries(payload)
         if not entries:
             break
 
         (RAW_DIR / f"make_logs_{offset}.json").write_text(json.dumps(payload, indent=2))
-        all_entries.extend(entries)
+
+        new_entries = []
+        for e in entries:
+            eid = entry_id(e)
+            if eid not in seen_ids:
+                seen_ids.add(eid)
+                new_entries.append(e)
+        if not new_entries:
+            print(f"Stopping at offset {offset}: page had no unseen IDs (endpoint may be ignoring offset).")
+            break
+        all_entries.extend(new_entries)
         offset += PAGE_LIMIT
 
     (RAW_DIR / "make_logs_all.json").write_text(json.dumps(all_entries, indent=2))
@@ -81,7 +114,7 @@ def main():
         str(e.get("status")) if isinstance(e, dict) else "?" for e in all_entries
     )
 
-    print(f"Total entries: {len(all_entries)}")
+    print(f"Total entries (deduped by ID): {len(all_entries)}")
     print(f"Oldest: {timestamps[0] if timestamps else 'n/a'}")
     print(f"Newest: {timestamps[-1] if timestamps else 'n/a'}")
     print("By status:")
