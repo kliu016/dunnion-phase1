@@ -1,0 +1,15 @@
+.env
+
+# data/ and out/ are ignored; only the .gitkeep placeholders are tracked.
+# (A plain "data/" pattern would also block the placeholders from committing.)
+data/*
+!data/raw/
+data/raw/*
+!data/raw/.gitkeep
+out/*
+!out/.gitkeep
+
+__pycache__/
+.venv/
+*.pyc
+.DS_Store
